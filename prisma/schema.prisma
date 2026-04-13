@@ -1,0 +1,297 @@
+// APEX - Agency OS Database Schema (MVP)
+// Database: PostgreSQL via Supabase
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// =======================
+// SYSTEM TABLES (Auth & Global)
+// =======================
+
+model Agency {
+  id             String    @id @default(uuid())
+  name           String
+  logoUrl        String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  users          User[]
+  clients        Client[]
+  settings       Setting[]
+  contentIdeas   ContentIdea[]
+  experiments    Experiment[]
+  growthPlaybook GrowthPlaybook[]
+}
+
+model User {
+  id             String    @id @default(uuid()) // Maps to Clerk User ID
+  email          String    @unique
+  name           String?
+  role           Role      @default(VIEWER) // admin, manager, creator, sales, viewer
+  agencyId       String
+  agency         Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  competitors    Competitor[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  CREATOR
+  SALES
+  VIEWER
+}
+
+model Setting {
+  id             String    @id @default(uuid())
+  key            String    @unique // e.g., 'APIFY_TOKEN', 'OPENAI_API_KEY'
+  value          String    // Encrypted string in prod
+  agencyId       String
+  agency         Agency    @relation(fields: [agencyId], references: [id])
+  updatedAt      DateTime  @updatedAt
+}
+
+// =======================
+// CLIENT & CRM TABLES
+// =======================
+
+model Client {
+  id             String    @id @default(uuid())
+  name           String
+  industry       String?
+  websiteUrl     String?
+  status         ClientStatus @default(ACTIVE)
+  agencyId       String
+  agency         Agency    @relation(fields: [agencyId], references: [id])
+  leads          Lead[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+enum ClientStatus {
+  ACTIVE
+  PAUSED
+  CHURNED
+}
+
+// =======================
+// PREDATOR ENGINE (Lead Hunter)
+// =======================
+
+model Lead {
+  id             String    @id @default(uuid())
+  companyName    String
+  contactEmail   String?
+  contactPhone   String?
+  websiteUrl     String?   // New: Google maps website
+  rating         Float?    // New: Google maps rating
+  reviewsCount   Int       @default(0) // New: Google maps total reviews
+  city           String?   // New: Targeted city
+  industry       String?   // New: Business type
+  score          Int       @default(0) // 0 to 100 Lead Score
+  scoreLabel     String?
+  googleMapsUrl  String?
+  address        String?
+  priority       String?   // New: High, Medium, Low
+  nextAction     String?   // New: AI recommended action
+  lastSyncAt     DateTime?
+  source         String    // e.g., 'Google Maps API', 'LinkedIn Scraper'
+  status         LeadStatus @default(NEW)
+  clientId       String?   // If assigned to a specific client's campaign
+  client         Client?   @relation(fields: [clientId], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  CONVERTED
+  LOST
+}
+
+// =======================
+// GHOST ENGINE (Competitor Monitor)
+// =======================
+
+model Competitor {
+  id              String          @id @default(cuid())
+  name            String
+  pageUrl         String
+  platform        String          @default("facebook")
+  profileImage    String?
+  followersCount  Int?
+  likesCount      Int?
+  category        String?
+  description     String?
+  totalAdsFound   Int             @default(0)
+  activeAdsCount  Int             @default(0)
+  lastScrapedAt   DateTime?
+  status          String          @default("pending")
+  ads             CompetitorAd[]
+  reports         GhostReport[]
+  userId          String
+  user            User            @relation(fields: [userId], references: [id])
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([userId])
+  @@index([pageUrl])
+  @@unique([pageUrl, userId])
+}
+
+model GhostReport {
+  id              String       @id @default(cuid())
+  websiteSpeed    String?
+  seoScore        Int?
+  topKeywords     String?
+  vulnerabilities String       @db.Text
+  attackPlan      String       @db.Text
+  competitorId    String
+  competitor      Competitor   @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  createdAt       DateTime     @default(now())
+  
+  @@index([competitorId])
+}
+
+model CompetitorAd {
+  id              String       @id @default(cuid())
+  adId            String?
+  bodyText        String?
+  linkTitle       String?
+  linkDescription String?
+  linkUrl         String?
+  imageUrl        String?
+  videoUrl        String?
+  thumbnailUrl    String?
+  ctaText         String?
+  ctaType         String?
+  isActive        Boolean      @default(true)
+  startDate       DateTime?
+  endDate         DateTime?
+  platform        String       @default("facebook")
+  adType          String?
+  currency        String?
+  spendLower      Int?
+  spendUpper      Int?
+  impressionsLower Int?
+  impressionsUpper Int?
+  sentiment       String?
+  mainTopic       String?
+  hasOffer        Boolean      @default(false)
+  offerText       String?
+  hookScore       Int?
+  competitorId    String
+  competitor      Competitor   @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  
+  @@index([competitorId])
+  @@index([isActive])
+}
+
+// =======================
+// FORGE ENGINE (Content Factory)
+// =======================
+
+model ContentIdea {
+  id             String    @id @default(uuid())
+  title          String
+  body           String    @db.Text
+  platform       String    // e.g., 'TikTok', 'Twitter'
+  status         ContentStatus @default(DRAFT)
+  agencyId       String
+  agency         Agency    @relation(fields: [agencyId], references: [id])
+  panelResults   ExpertPanelResult[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+enum ContentStatus {
+  DRAFT
+  APPROVED
+  SCHEDULED
+  PUBLISHED
+}
+
+// Expert Panel results (from ai-marketing-skills content-ops)
+model ExpertPanelResult {
+  id            String      @id @default(cuid())
+  contentIdeaId String?
+  contentIdea   ContentIdea? @relation(fields: [contentIdeaId], references: [id], onDelete: SetNull)
+  contentType   String      // ad, post, email, landing_page
+  originalText  String      @db.Text
+  improvedText  String      @db.Text
+  finalScore    Int         // 0-100
+  rounds        Int         @default(1)
+  panelScores   Json        // {expert: score} per expert
+  topWeaknesses String?     @db.Text
+  createdAt     DateTime    @default(now())
+
+  @@index([contentIdeaId])
+}
+
+// =======================
+// PULSE ENGINE (Growth Experiments - from ai-marketing-skills)
+// =======================
+
+model Experiment {
+  id           String      @id @default(cuid())
+  name         String
+  hypothesis   String      @db.Text
+  variable     String
+  metric       String      // impressions, clicks, conversions, engagement
+  status       ExperimentStatus @default(RUNNING)
+  variants     Json        // ["variant_a", "variant_b"]
+  winnerId     String?
+  minSamples   Int         @default(15)
+  agencyId     String
+  agency       Agency      @relation(fields: [agencyId], references: [id])
+  dataPoints   DataPoint[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([agencyId])
+  @@index([status])
+}
+
+enum ExperimentStatus {
+  RUNNING
+  TRENDING
+  KEEP
+  DISCARD
+}
+
+model DataPoint {
+  id           String     @id @default(cuid())
+  experimentId String
+  experiment   Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  variant      String
+  metrics      Json       // {"impressions": 1200, "clicks": 45, "conversions": 3}
+  recordedAt   DateTime   @default(now())
+
+  @@index([experimentId])
+  @@index([variant])
+}
+
+model GrowthPlaybook {
+  id          String   @id @default(cuid())
+  rule        String   @db.Text   // "Thread posts get 2x engagement vs single posts"
+  evidence    String   @db.Text   // Experiment summary
+  lift        Float               // % improvement (e.g. 28.5)
+  channel     String              // content, email, linkedin, seo
+  agencyId    String
+  agency      Agency   @relation(fields: [agencyId], references: [id])
+  addedAt     DateTime @default(now())
+
+  @@index([agencyId])
+  @@index([channel])
+}
