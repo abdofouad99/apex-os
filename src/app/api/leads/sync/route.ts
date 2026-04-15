@@ -56,6 +56,12 @@ export async function POST(req: Request) {
 
   } catch (error: any) {
     console.error("Leads Sync API Error:", error);
+    if (error.message === "APIFY_QUOTA_EXCEEDED") {
+      return NextResponse.json({
+        error: "APIFY_QUOTA_EXCEEDED",
+        message: "نفد رصيد Apify الشهري. يتجدد مطلع الشهر القادم أو يمكنك الاستمرار بالوضع الوهمي"
+      }, { status: 402 });
+    }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

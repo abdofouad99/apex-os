@@ -7,8 +7,7 @@
  * - X/Twitter: FxTwitter API (free)
  */
 
-const APIFY_TOKEN = process.env.APIFY_API_TOKEN;
-const APIFY_BASE = "https://api.apify.com/v2";
+import { runApifyWithRotation } from "@/lib/apify-rotator";
 
 export interface SocialProfileData {
   platform: "instagram" | "tiktok" | "x" | "facebook";
@@ -40,63 +39,7 @@ export interface SocialProfileData {
   dataSource: "apify" | "api" | "limited";
 }
 
-// ── Apify Runner ──
-async function runApifyActor(actorId: string, input: object, timeoutSecs = 120): Promise<any[]> {
-  if (!APIFY_TOKEN) throw new Error("APIFY_API_TOKEN not configured");
 
-  // Apify uses ~ instead of / in actor IDs in URLs
-  const encodedActorId = actorId.replace("/", "~");
-
-  // Start run
-  const startRes = await fetch(`${APIFY_BASE}/acts/${encodedActorId}/runs?token=${APIFY_TOKEN}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input)
-  });
-
-  if (!startRes.ok) {
-    const txt = await startRes.text();
-    throw new Error(`Apify start failed (${startRes.status}): ${txt.substring(0, 200)}`);
-  }
-
-  const { data: runData } = await startRes.json();
-  const runId = runData.id;
-  const datasetId = runData.defaultDatasetId;
-  console.log(`🚀 Apify [${actorId}] started: runId=${runId}`);
-
-  // Poll for completion
-  const maxAttempts = Math.ceil(timeoutSecs / 5);
-  let attempts = 0;
-  let status = "RUNNING";
-
-  while ((status === "RUNNING" || status === "READY") && attempts < maxAttempts) {
-    await new Promise(r => setTimeout(r, 5000));
-    attempts++;
-
-    try {
-      const statusRes = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${APIFY_TOKEN}`);
-      const { data } = await statusRes.json();
-      status = data.status;
-      console.log(`📊 Apify [${actorId}] status: ${status} (${attempts}/${maxAttempts})`);
-      if (status === "SUCCEEDED") break;
-      if (status === "FAILED" || status === "ABORTED" || status === "TIMED-OUT") {
-        throw new Error(`Apify run ${status}`);
-      }
-    } catch (e: any) {
-      if (e.message.includes("Apify run")) throw e;
-    }
-  }
-
-  // Fetch results
-  const resultsRes = await fetch(
-    `${APIFY_BASE}/datasets/${datasetId}/items?token=${APIFY_TOKEN}&limit=20`
-  );
-  if (!resultsRes.ok) throw new Error(`Failed to fetch dataset: ${resultsRes.status}`);
-
-  const items = await resultsRes.json();
-  console.log(`📦 Apify [${actorId}] got ${items.length} items`);
-  return items;
-}
 
 // ── Main Entry ──
 export async function scrapeSocialProfile(platformUrl: string): Promise<SocialProfileData> {
@@ -163,7 +106,7 @@ async function scrapeInstagram(url: string, username: string): Promise<Partial<S
   console.log(`📸 Instagram: Scraping @${username} via Apify...`);
 
   // apify~instagram-profile-scraper: Official Apify Instagram actor
-  const items = await runApifyActor("apify/instagram-profile-scraper", {
+  const items = await runApifyWithRotation("apify/instagram-profile-scraper", {
     usernames: [username],
     resultsLimit: 12
   }, 120);
@@ -222,7 +165,7 @@ async function scrapeFacebook(url: string, username: string): Promise<Partial<So
   // Run both actors in parallel: page metadata + posts
   const [pageItems, postItems] = await Promise.allSettled([
     // Actor 1: Page metadata (followers, bio, category)
-    runApifyActor("apify/facebook-pages-scraper", {
+    runApifyWithRotation("apify/facebook-pages-scraper", {
       startUrls: [{ url: normalizedUrl }],
       maxPosts: 0,
       maxPostComments: 0,
@@ -230,7 +173,7 @@ async function scrapeFacebook(url: string, username: string): Promise<Partial<So
       proxyConfiguration: { useApifyProxy: true }
     }, 120),
     // Actor 2: Actual page posts
-    runApifyActor("apify/facebook-posts-scraper", {
+    runApifyWithRotation("apify/facebook-posts-scraper", {
       startUrls: [{ url: normalizedUrl }],
       resultsLimit: 12,
       proxyConfiguration: { useApifyProxy: true }
@@ -311,7 +254,7 @@ async function scrapeTikTok(url: string, username: string): Promise<Partial<Soci
   const cleanUsername = username.startsWith("@") ? username : `@${username}`;
 
   // clockworks~tiktok-profile-scraper: Reliable TikTok actor
-  const items = await runApifyActor("clockworks/tiktok-profile-scraper", {
+  const items = await runApifyWithRotation("clockworks/tiktok-profile-scraper", {
     profiles: [cleanUsername],
     shouldDownloadVideos: false,
     shouldDownloadCovers: false,
@@ -478,3 +421,4 @@ function extractUsername(url: string): string {
     return url.replace(/.*[/@]/, "").split("?")[0];
   }
 }
+

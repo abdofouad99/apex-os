@@ -3,7 +3,7 @@
  * Tries tokens in order, automatically rotates on 403 quota exceeded
  */
 
-const APIFY_TOKENS = [
+export const APIFY_TOKENS = [
   process.env.APIFY_API_TOKEN,
   process.env.APIFY_API_TOKEN_2,
   process.env.APIFY_API_TOKEN_3,
