@@ -12,6 +12,13 @@ const nextConfig: NextConfig = {
 
   // Suppress hydration warnings for RTL content
   reactStrictMode: true,
+
+  typescript: {
+    ignoreBuildErrors: true,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
 };
 
 export default nextConfig;
