@@ -154,7 +154,7 @@ export async function POST(req: Request) {
   try {
     const { pageUrl } = await req.json();
     if (!pageUrl) return NextResponse.json({ error: "pageUrl مطلوب" }, { status: 400 });
-    if (!APIFY_TOKEN) return NextResponse.json({ error: "APIFY_API_TOKEN غير مهيأ" }, { status: 500 });
+    if (!process.env.APIFY_API_TOKEN) return NextResponse.json({ error: "APIFY_API_TOKEN غير مهيأ" }, { status: 500 });
 
     // Extract slug
     const cleanUrl = pageUrl.startsWith("http") ? pageUrl : "https://" + pageUrl;
