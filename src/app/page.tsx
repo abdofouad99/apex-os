@@ -5,11 +5,21 @@ import prisma from "@/lib/prisma";
 import { FacebookLoginButton } from "@/components/auth/FacebookLoginButton";
 
 export default async function DashboardPage() {
-  // Fetch real metrics from the DB
-  const leadsCount = await prisma.lead.count();
-  const competitorsCount = await prisma.competitor.count();
-  const adsCount = await prisma.competitorAd.count();
-  const ideasCount = await prisma.contentIdea.count();
+  // Fetch metrics — graceful fallback if DB unreachable
+  let leadsCount = 0, competitorsCount = 0, adsCount = 0, ideasCount = 0;
+  let dbOnline = false;
+  try {
+    [leadsCount, competitorsCount, adsCount, ideasCount] = await Promise.all([
+      prisma.lead.count(),
+      prisma.competitor.count(),
+      prisma.competitorAd.count(),
+      prisma.contentIdea.count(),
+    ]);
+    dbOnline = true;
+  } catch {
+    // DB unavailable — show zeros
+  }
+
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-950 text-gray-100 p-4 md:p-8 font-cairo" dir="rtl">

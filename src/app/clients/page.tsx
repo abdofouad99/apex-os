@@ -6,7 +6,9 @@ import { ArrowRight } from "lucide-react";
 
 export default async function ClientsPage() {
   const cookieStore = await cookies();
-  const fbToken = cookieStore.get("fb_access_token")?.value;
+  // Use cookie token first, then env token as fallback
+  const fbToken = cookieStore.get("fb_access_token")?.value
+    || process.env.FACEBOOK_ACCESS_TOKEN;
 
   let pages: any[] = [];
   let adAccounts: any[] = [];

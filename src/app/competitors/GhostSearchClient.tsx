@@ -1,371 +1,501 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { Search, Loader2, LayoutGrid, List, Filter, TrendingUp, Ghost, Globe, ThumbsUp, AlertCircle } from 'lucide-react';
-import { useRouter } from 'next/navigation';
-import AdCard from './AdCard';
-import { analyzeAdsBatch } from '@/services/ghost/ad-analyzer';
+import React, { useState } from "react";
+import {
+  Search, Loader2, TrendingUp, AlertCircle, Copy, Check,
+  Eye, Play, Image as ImageIcon, BarChart3, Zap, ScanSearch,
+  CheckCircle, XCircle, Globe, ExternalLink, RefreshCw, Brain
+} from "lucide-react";
 
-export default function GhostSearchClient({ initialCompetitors, hasToken }: { initialCompetitors: any[], hasToken: boolean }) {
-  const router = useRouter();
+interface Ad {
+  adId: string;
+  pageName: string;
+  adText: string;
+  imageUrl: string;
+  videoUrl: string;
+  isActive: boolean;
+  startDate: string | null;
+  ctaText: string | null;
+  linkUrl: string | null;
+}
+
+interface ScanResult {
+  pageUrl: string;
+  pageName: string;
+  totalAds: number;
+  activeAds: number;
+  totalPosts?: number;
+  ads: Ad[];
+  pageInfo?: { page_id?: string; creation_date?: string; ad_status?: string } | null;
+  adStatus?: string | null;
+  noAdsReason?: string | null;
+  isOrganicFallback?: boolean;
+}
+
+const LOADING_STAGES = [
+  { label: "🔍 تحديد الصفحة وفحص الرابط...", delay: 0 },
+  { label: "👻 إطلاق الشبح نحو مكتبة الإعلانات...", delay: 3000 },
+  { label: "📦 جمع الإعلانات النشطة والمنتهية...", delay: 8000 },
+  { label: "🔬 تحليل محتوى الإعلانات...", delay: 15000 },
+  { label: "📊 بناء التقرير الاستراتيجي...", delay: 25000 },
+];
+
+export default function GhostSearchClient() {
   const [pageUrl, setPageUrl] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
-  const [message, setMessage] = useState("");
-  const [competitors, setCompetitors] = useState<any[]>(initialCompetitors || []);
-  
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const [filter, setFilter] = useState('ALL');
-  const [sortOpts, setSortOpts] = useState('newest');
+  const [isScanning, setIsScanning] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [loadingStage, setLoadingStage] = useState(0);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<ScanResult | null>(null);
+  const [report, setReport] = useState("");
+  const [reportSource, setReportSource] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [activeTab, setActiveTab] = useState<"ads" | "report">("ads");
 
-  // Active competitor is the most recently scraped one
-  const activeCompetitor = competitors && competitors.length > 0 ? competitors[0] : null;
-  const ads = activeCompetitor?.ads || [];
-
-  // Fetch fresh data from API
-  const refreshCompetitors = async () => {
-    try {
-      const res = await fetch("/api/ghost/sync");
-      const data = await res.json();
-      if (data.success && data.competitors) {
-        setCompetitors(data.competitors);
-      }
-    } catch (err) {
-      console.error("Failed to refresh competitors:", err);
-    }
+  // Normalize URL
+  const normalizeUrl = (url: string) => {
+    if (!url) return "";
+    if (!url.startsWith("http")) return "https://" + url;
+    return url;
   };
 
-  const handleSearch = async (e?: React.FormEvent, directUrl?: string) => {
-    if (e) e.preventDefault();
-    const targetUrl = directUrl || pageUrl;
-    if (!targetUrl) return;
+  // ── Scrape Ads ──
+  const handleScan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pageUrl.trim()) return;
 
-    if (targetUrl.includes('/share/')) {
-      setMessage("❌ عذراً! هذا رابط (مشاركة منشور). ضع رابط (صفحة الشركة) الرئيسية لتسحب إعلاناتها.");
-      return;
-    }
+    const normalized = normalizeUrl(pageUrl.trim());
+    setIsScanning(true);
+    setError("");
+    setResult(null);
+    setReport("");
+    setLoadingStage(0);
 
-    setIsSearching(true);
-    setMessage(hasToken ? "جاري تجهيز الشبح للاختراق... 👻" : "جاري تشغيل الشبح (الوضع الوهمي)... 👻");
+    // Progress animation
+    LOADING_STAGES.forEach((stage, i) => {
+      if (i > 0) setTimeout(() => setLoadingStage(i), stage.delay);
+    });
 
     try {
       const res = await fetch("/api/ghost/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pageUrl: targetUrl })
+        body: JSON.stringify({ pageUrl: normalized })
       });
+
       const data = await res.json();
-      
-      if (data.success && data.runId) {
-        setMessage(`تم إطلاق الشبح للبحث في مكتبة إعلانات: ${targetUrl}. يرجى الانتظار...`);
-        setPageUrl(targetUrl);
-        await pollGhostStatus(data.runId, targetUrl);
-      } else {
-        setMessage("عذراً، الشبح فشل في الانطلاق.");
-        setIsSearching(false);
+
+      if (res.status === 402 || data.error === "APIFY_QUOTA_EXCEEDED") {
+        setError("QUOTA_EXCEEDED");
+        return;
       }
-    } catch (error) {
-      setMessage("فشل الاتصال بالخادم.");
-      setIsSearching(false);
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "فشل جلب الإعلانات");
+      }
+
+      setResult(data);
+      setActiveTab("ads");
+    } catch (err: any) {
+      setError(err.message || "حدث خطأ غير متوقع");
+    } finally {
+      setIsScanning(false);
     }
   };
 
-  const pollGhostStatus = async (runId: string, targetUrl: string) => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const res = await fetch("/api/ghost/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ runId, pageUrl: targetUrl })
-        });
-        const data = await res.json();
+  // ── AI Analyze Ads ──
+  const handleAnalyze = async () => {
+    if (!result) return;
+    setIsAnalyzing(true);
+    setReport("");
+    setActiveTab("report");
 
-        if (data.status === "COMPLETED") {
-          clearInterval(pollInterval);
-          setMessage("✅ " + data.message);
-          setIsSearching(false);
-          // Fetch fresh data directly instead of relying on router.refresh()
-          await refreshCompetitors();
-        } else {
-          setMessage(`الشبح يقرأ البيانات... الحالة: ${data.status || 'RUNNING'} 👻`);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }, 5000);
+    try {
+      const res = await fetch("/api/ghost/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ads: result.ads,
+          pageUrl: result.pageUrl,
+          pageName: result.pageName,
+          noAdsMode: result.ads.length === 0 && !result.isOrganicFallback,
+          adStatus: result.adStatus,
+          pageInfo: result.pageInfo,
+          isOrganicFallback: result.isOrganicFallback
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "فشل التحليل");
+
+      setReport(data.report);
+      setReportSource(data.source);
+    } catch (err: any) {
+      setError(err.message);
+      setActiveTab("ads");
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
-  const batchAnalysis = analyzeAdsBatch(ads);
 
-  // Deep Scan State
-  const [isDeepScanning, setIsDeepScanning] = useState(false);
-  const [ghostReport, setGhostReport] = useState<any>(null);
-  const [scanSteps, setScanSteps] = useState<string[]>([]);
-  
-  const handleDeepScan = async () => {
-     if (!activeCompetitor) return;
-     setIsDeepScanning(true);
-     setScanSteps(["جاري تحليل الإعلانات...", "قراءة المحتوى الإبداعي...", "استخراج الكلمات المفتاحية..."]);
-     
-     // Simulate terminal steps effect
-     let stepIndex = 0;
-     const interval = setInterval(() => {
-        stepIndex++;
-        if(stepIndex === 1) setScanSteps(prev => [...prev, "تقييم أداء الحملات (SEO)..."]);
-        if(stepIndex === 2) setScanSteps(prev => [...prev, "توجيه Gemini لصياغة استراتيجية تسويقية..."]);
-        if(stepIndex > 2) clearInterval(interval);
-     }, 1500);
-
-     try {
-       const res = await fetch("/api/ghost/deep-scan", {
-         method: "POST",
-         headers: { "Content-Type": "application/json" },
-         body: JSON.stringify({ competitorId: activeCompetitor.id })
-       });
-       const data = await res.json();
-       clearInterval(interval);
-       if (data.success) {
-         setScanSteps(prev => [...prev, "✅ تم إعداد التقرير التسويقي بنجاح!"]);
-         setTimeout(() => { setIsDeepScanning(false); setGhostReport(data.report); }, 1500);
-       } else {
-         setIsDeepScanning(false);
-         alert("فشل الفحص العميق!");
-       }
-     } catch (err) {
-       clearInterval(interval);
-       setIsDeepScanning(false);
-       alert("تعذر الاتصال بقاعدة GHOST.");
-     }
+  const copyReport = () => {
+    navigator.clipboard.writeText(report);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  // Filter & Sort
-  let displayAds = [...ads];
-  if (filter === 'ACTIVE') displayAds = displayAds.filter(a => a.isActive);
-  if (filter === 'INACTIVE') displayAds = displayAds.filter(a => !a.isActive);
-  if (filter === 'OFFER') displayAds = displayAds.filter(a => a.hasOffer);
-  if (filter === 'VIDEO') displayAds = displayAds.filter(a => !!a.videoUrl);
-
-  if (sortOpts === 'hook') displayAds.sort((a, b) => (b.hookScore || 0) - (a.hookScore || 0));
-  if (sortOpts === 'newest') displayAds.sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
-  
+  // ─── UI ───
   return (
-    <div className="w-full max-w-7xl mx-auto space-y-8 pb-16">
-      
-      {/* Search Header */}
-      <div className="bg-gray-900 border border-gray-800 rounded-3xl p-6 md:p-8 shadow-2xl relative overflow-hidden">
-        {/* Decorative BG */}
-        <div className="absolute top-0 right-0 w-96 h-96 bg-purple-600/10 rounded-full blur-[100px] pointer-events-none" />
-        
-        <div className="relative z-10 flex flex-col md:flex-row gap-6 items-center">
-          <div className="flex-1 w-full space-y-4">
-            <div>
-              <p className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-500 mb-1">حدد هدفك</p>
-              <h2 className="text-2xl font-bold text-white">إطلاق الشبح 👻</h2>
-            </div>
-            
-            <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3">
-              <input 
-                type="text" value={pageUrl} onChange={e => setPageUrl(e.target.value)}
-                placeholder="أدخل رابط صفحة المنافس (Facebook / Instagram)..."
-                className="flex-1 bg-gray-950 border border-gray-800 rounded-xl h-14 px-5 text-gray-200 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all placeholder:text-gray-600"
-              />
-              <button 
-                type="submit" disabled={isSearching}
-                className="h-14 px-8 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-purple-900/50 transition-all active:scale-95 disabled:opacity-50 min-w-[160px]"
-              >
-                {isSearching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Ghost className="w-5 h-5" />}
-                <span>{isSearching ? "جاري التجسس..." : "بدء التجسس"}</span>
-              </button>
-            </form>
-
-            <div className="flex flex-wrap gap-2 text-xs">
-              <span className="text-gray-500">روابط سريعة للتجربة:</span>
-              <button type="button" onClick={() => handleSearch(undefined, 'https://facebook.com/Apple')} className="text-purple-400 hover:underline">Apple</button>
-              <button type="button" onClick={() => handleSearch(undefined, 'https://facebook.com/Nike')} className="text-purple-400 hover:underline">Nike</button>
-            </div>
-            
-            {message && (
-              <div 
-                onClick={() => {
-                  if (message.includes('بنجاح')) {
-                    document.getElementById('ads-grid')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                  }
-                }}
-                className={`mt-4 px-4 py-3 rounded-xl text-sm flex items-center gap-3 transition-all ${message.includes('بنجاح') ? 'cursor-pointer hover:bg-purple-900/40 hover:shadow-lg hover:shadow-purple-900/20 active:scale-[0.98] ring-1 ring-purple-500/50 hover:ring-purple-400' : ''} ${message.includes('❌') || message.includes('فشل') ? 'bg-red-900/20 text-red-400 border border-red-900/50' : 'bg-purple-900/20 text-purple-300 border border-purple-800/50'}`}
-                title={message.includes('بنجاح') ? "اضغط هنا للانتقال للإعلانات" : ""}
-              >
-                {isSearching ? <Ghost className="w-4 h-4 animate-bounce text-purple-400" /> : message.includes('بنجاح') ? <span className="animate-pulse">✨</span> : null}
-                <span className="flex-1">{message}</span>
-                {message.includes('بنجاح') && <span className="text-xs bg-purple-600 text-white px-2 py-0.5 rounded-full animate-bounce">اضغط للعرض 👇</span>}
-              </div>
-            )}
-            {!hasToken && !isSearching && (
-              <div className="mt-2 text-xs text-yellow-500 flex items-center gap-1">
-                <AlertCircle className="w-3 h-3" /> يعمل التجسس حالياً بوضع الطيران الآلي الوهمي للواجهة فقط.
-              </div>
-            )}
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#0a0f1c] font-sans" dir="rtl">
+      {/* Background glow */}
+      <div className="fixed inset-0 pointer-events-none z-0">
+        <div className="absolute top-0 right-1/4 w-[50vw] h-[50vw] bg-purple-500/5 rounded-full blur-[100px]" />
+        <div className="absolute bottom-0 left-1/4 w-[60vw] h-[60vw] bg-indigo-500/5 rounded-full blur-[120px]" />
       </div>
 
-      {isSearching && !activeCompetitor && (
-         <div className="flex flex-col items-center justify-center py-20 text-gray-400 gap-4">
-           <div className="relative">
-             <Ghost className="w-16 h-16 text-purple-600 animate-bounce" />
-             <div className="absolute inset-0 bg-purple-600 blur-xl opacity-30 animate-pulse rounded-full" />
-           </div>
-           <p className="font-bold text-lg text-purple-400">الشبح يتسلق جدران مكتبة فيسبوك...</p>
-         </div>
-      )}
+      <div className="relative z-10 max-w-5xl mx-auto px-4 py-10">
 
-      {/* Competitor Dashboard */}
-      {!isSearching && activeCompetitor && (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-500">
-          
-          {/* Competitor Top Info */}
-          <div className="flex flex-col md:flex-row gap-6 items-start">
-            <div className="flex flex-col gap-4 bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full md:w-1/3 shadow-lg">
-              <div className="flex items-center gap-4">
-                <div className="w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-full flex items-center justify-center text-2xl shadow-xl shadow-purple-900/30 font-bold border-2 border-gray-800 shrink-0">
-                   {activeCompetitor.name.charAt(0)}
+        {/* Header */}
+        <div className="text-center mb-10">
+          <div className="inline-flex items-center gap-2 bg-purple-500/10 border border-purple-500/30 rounded-full px-4 py-1.5 text-xs text-purple-400 mb-5">
+            <span className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-pulse" />
+            مكتبة إعلانات Facebook — بيانات حقيقية
+          </div>
+          <h1 className="text-4xl font-black text-white mb-3">
+            👻 <span className="bg-gradient-to-r from-purple-400 to-indigo-400 bg-clip-text text-transparent">الشبح</span>
+          </h1>
+          <p className="text-slate-400 max-w-lg mx-auto">
+            أدخل رابط أي صفحة Facebook — سواء منافسيك أو صفحتك — لاستخراج إعلاناتها الحقيقية وتحليلها بالذكاء الاصطناعي
+          </p>
+        </div>
+
+        {/* Search Form */}
+        <form onSubmit={handleScan} className="mb-8">
+          <div className="flex gap-3">
+            <div className="flex-1 relative">
+              <Globe className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+              <input
+                type="text"
+                value={pageUrl}
+                onChange={e => setPageUrl(e.target.value)}
+                placeholder="facebook.com/alabeer.marketing أو رابط أي صفحة منافسة"
+                className="w-full h-13 bg-slate-900 border border-white/10 rounded-xl pr-12 pl-4 py-4 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 transition-all text-left"
+                dir="ltr"
+                disabled={isScanning}
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isScanning || !pageUrl.trim()}
+              className="h-13 px-7 py-4 rounded-xl bg-purple-600 text-white font-bold hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2 whitespace-nowrap"
+            >
+              {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              {isScanning ? "جاري الفحص..." : "ابدأ الفحص"}
+            </button>
+          </div>
+        </form>
+
+        {/* Loading */}
+        {isScanning && (
+          <div className="bg-slate-900/80 border border-purple-500/20 rounded-2xl p-8 mb-8 text-center">
+            <div className="w-16 h-16 rounded-full bg-purple-500/10 flex items-center justify-center mx-auto mb-5 animate-pulse">
+              <span className="text-3xl">👻</span>
+            </div>
+            <p className="text-white font-semibold mb-2">الشبح يتجسس الآن...</p>
+            <p className="text-purple-400 text-sm mb-6">{LOADING_STAGES[loadingStage]?.label}</p>
+            <div className="space-y-2 max-w-sm mx-auto">
+              {LOADING_STAGES.map((stage, i) => (
+                <div key={i} className={`flex items-center gap-3 text-sm transition-all ${i <= loadingStage ? "text-white" : "text-slate-600"}`}>
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${i < loadingStage ? "bg-purple-400" : i === loadingStage ? "bg-purple-400 animate-pulse" : "bg-slate-700"}`} />
+                  {stage.label}
                 </div>
-                <div className="overflow-hidden">
-                  <h3 className="font-bold text-xl text-white flex items-center gap-2 truncate">
-                    {activeCompetitor.name}
-                    {activeCompetitor.platform === 'facebook' && <Globe className="w-4 h-4 text-blue-500 shrink-0" />}
-                  </h3>
-                  <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
-                     <div>اكتشفنا {activeCompetitor.totalAdsFound} إعلان</div>
+              ))}
+            </div>
+            <p className="text-slate-600 text-xs mt-6">قد يستغرق حتى دقيقتين</p>
+          </div>
+        )}
+
+        {/* Error */}
+        {error && (
+          error === "QUOTA_EXCEEDED" ? (
+            <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-8 mb-6">
+              <div className="flex items-start gap-5">
+                <div className="shrink-0 w-14 h-14 rounded-xl bg-amber-500/10 flex items-center justify-center text-2xl">
+                  🔋
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-white font-bold text-lg mb-1">نفد رصيد Apify الشهري</h3>
+                  <p className="text-amber-400 text-sm mb-4">
+                    استُهلك رصيد الـ $5 المجاني لهذا الشهر من كثرة الفحوصات.
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 mb-5">
+                    <div className="bg-slate-800/50 rounded-lg p-4">
+                      <p className="text-slate-300 text-sm font-semibold mb-2">🔄 الحل السريع (مجاني)</p>
+                      <p className="text-slate-400 text-sm">ينتجدد الرصيد تلقائياً في بداية الشهر القادم</p>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-lg p-4">
+                      <p className="text-slate-300 text-sm font-semibold mb-2">⚡ رفع الرصيد الآن</p>
+                      <p className="text-slate-400 text-sm mb-2">أضف رصيداً من لوحة Apify لمتابعة الفحوصات فوراً</p>
+                      <a
+                        href="https://console.apify.com/billing"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-1.5 rounded-lg hover:bg-amber-500/20 transition-all"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        فتح لوحة Apify Billing
+                      </a>
+                    </div>
                   </div>
+                  <button
+                    onClick={() => { setError(""); setPageUrl(""); }}
+                    className="text-sm text-slate-400 hover:text-white underline transition-colors"
+                  >
+                    إغلاق
+                  </button>
                 </div>
               </div>
-              
-              <button 
-                onClick={handleDeepScan}
-                disabled={isDeepScanning}
-                className="mt-2 w-full py-2.5 bg-purple-600/10 border border-purple-500/50 hover:bg-purple-600/20 text-purple-400 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
-              >
-                {isDeepScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>📊</span>}
-                {isDeepScanning ? "جارِ التحليل التسويقي..." : "تحليل تسويقي عميق (AI Analysis)"}
-              </button>
+            </div>
+          ) : (
+            <div className="bg-red-950/50 border border-red-500/30 rounded-xl p-4 mb-6 flex items-center gap-3 text-red-400">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              <p className="text-sm">{error}</p>
+            </div>
+          )
+        )}
+
+
+        {/* Results */}
+        {result && !isScanning && (
+          <div>
+            {/* Stats Bar */}
+            <div className="bg-slate-900 border border-white/10 rounded-2xl p-5 mb-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-white font-bold text-lg">{result.pageName || result.pageUrl}</h2>
+                  <p className="text-slate-500 text-sm">{result.pageUrl}</p>
+                </div>
+                {result.isOrganicFallback ? (
+                  <div className="flex gap-6">
+                    <div className="text-center">
+                      <div className="text-2xl font-black text-blue-400">{result.ads.length}</div>
+                      <div className="text-xs text-slate-500">منشور عضوي</div>
+                    </div>
+                    <div className="flex items-center">
+                      <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-3 py-1.5 rounded-full font-medium">📝 لا إعلانات مدفوعة — عرض آخر المنشورات</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex gap-6">
+                    <div className="text-center">
+                      <div className="text-2xl font-black text-white">{result.totalAds}</div>
+                      <div className="text-xs text-slate-500">إجمالي الإعلانات</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-black text-emerald-400">{result.activeAds}</div>
+                      <div className="text-xs text-slate-500">نشطة الآن</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-black text-orange-400">{result.totalAds - result.activeAds}</div>
+                      <div className="text-xs text-slate-500">منتهية</div>
+                    </div>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setPageUrl(""); setResult(null); setReport(""); }}
+                    className="h-9 px-4 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:border-white/20 transition-all flex items-center gap-2 text-sm"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> فحص جديد
+                  </button>
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={isAnalyzing}
+                    className="h-9 px-5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-500 disabled:opacity-50 transition-all flex items-center gap-2 text-sm"
+                  >
+                    {isAnalyzing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Brain className="w-3.5 h-3.5" />}
+                    {isAnalyzing ? "جاري التحليل..." : result.isOrganicFallback ? "تحليل AI للمنشورات" : "تحليل AI للإعلانات"}
+                  </button>
+                </div>
+              </div>
             </div>
 
-            {/* AI Analysis Cards OR Loading Terminal OR Report */}
-            {isDeepScanning ? (
-              <div className="bg-gray-950 border border-purple-500/30 rounded-2xl p-6 w-full md:w-2/3 shadow-lg relative overflow-hidden">
-                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-purple-500 to-transparent opacity-50"></div>
-                 <div className="text-purple-400 text-xs mb-3 flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse"></div> APEX AI Marketing Analyzer</div>
-                 <div className="space-y-2 text-sm text-purple-300/80">
-                   {scanSteps.map((step, i) => (
-                     <div key={i} className="animate-in slide-in-from-left-4 duration-300 flex items-center gap-2"><span className="text-purple-500">●</span> {step}</div>
-                   ))}
-                 </div>
+            {/* Tabs */}
+            {(result.ads.length > 0 || report) && (
+              <div className="flex border-b border-white/10 mb-6 gap-1">
+                <button
+                  onClick={() => setActiveTab("ads")}
+                  className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-all ${activeTab === "ads" ? "text-white bg-slate-900 border-t border-x border-white/10" : "text-slate-500 hover:text-white"}`}
+                >
+                  {result.isOrganicFallback ? `📝 المنشورات (${result.ads.length})` : `📋 الإعلانات (${result.ads.length})`}
+                </button>
+                {(report || isAnalyzing) && (
+                  <button
+                    onClick={() => setActiveTab("report")}
+                    className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-all flex items-center gap-2 ${activeTab === "report" ? "text-white bg-slate-900 border-t border-x border-white/10" : "text-slate-500 hover:text-white"}`}
+                  >
+                    🤖 تقرير AI {isAnalyzing && <Loader2 className="w-3 h-3 animate-spin" />}
+                  </button>
+                )}
               </div>
-            ) : ghostReport ? (
-              <div className="bg-gradient-to-br from-gray-900 to-[#0f0f1a] border border-purple-500/30 rounded-2xl p-6 w-full md:w-2/3 shadow-lg shadow-purple-900/20 relative">
-                 <div className="flex justify-between items-start mb-4">
-                    <h3 className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400 flex items-center gap-2">
-                       <span className="text-xl">📊</span> تقرير تحليل المنافس (Marketing Report)
-                    </h3>
-                    <div className="flex gap-3 text-xs font-bold">
-                       <span className="bg-gray-800 py-1 px-3 rounded-lg border border-gray-700">SEO: {ghostReport.seoScore}%</span>
-                       <span className={`bg-gray-800 py-1 px-3 rounded-lg border border-gray-700 ${ghostReport.websiteSpeed?.includes('بطيء') || ghostReport.websiteSpeed?.includes('Slow') ? 'text-red-400' : 'text-green-400'}`}>{ghostReport.websiteSpeed}</span>
+            )}
+
+            {/* Ads Tab */}
+            {activeTab === "ads" && (
+              <div className="space-y-4">
+                {result.ads.length === 0 ? (
+                  <div className="bg-slate-900 border border-amber-500/20 rounded-2xl p-8">
+                    <div className="flex items-start gap-5">
+                      <div className="shrink-0 w-14 h-14 rounded-xl bg-amber-500/10 flex items-center justify-center text-2xl">
+                        📭
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="text-white font-bold text-lg mb-1">هذه الصفحة لا تملك إعلانات مدفوعة</h3>
+                        <p className="text-amber-400 text-sm mb-4">
+                          {result.adStatus || result.noAdsReason || "لا توجد إعلانات نشطة في مكتبة Facebook حالياً"}
+                        </p>
+
+                        {result.pageInfo && (
+                          <div className="grid grid-cols-2 gap-3 mb-5">
+                            {result.pageInfo.page_id && (
+                              <div className="bg-slate-800/50 rounded-lg p-3">
+                                <div className="text-xs text-slate-500 mb-1">معرّف الصفحة</div>
+                                <div className="text-sm text-white font-mono">{result.pageInfo.page_id}</div>
+                              </div>
+                            )}
+                            {result.pageInfo.creation_date && (
+                              <div className="bg-slate-800/50 rounded-lg p-3">
+                                <div className="text-xs text-slate-500 mb-1">تاريخ إنشاء الصفحة</div>
+                                <div className="text-sm text-white">{result.pageInfo.creation_date}</div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="bg-indigo-950/50 border border-indigo-500/20 rounded-xl p-4 mb-4">
+                          <p className="text-indigo-300 text-sm font-semibold mb-1">💡 هذا يعني فرصة ذهبية!</p>
+                          <p className="text-slate-400 text-sm">
+                            الصفحة لا تستثمر في الإعلانات المدفوعة. يمكن تحليل هذا الوضع بالذكاء الاصطناعي لفهم التأثير وتقديم توصيات.
+                          </p>
+                        </div>
+
+                        <button
+                          onClick={handleAnalyze}
+                          disabled={isAnalyzing}
+                          className="flex items-center gap-2 h-10 px-6 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500 disabled:opacity-50 transition-all text-sm"
+                        >
+                          {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
+                          {isAnalyzing ? "جاري التحليل..." : "حلّل هذا الوضع بالذكاء الاصطناعي"}
+                        </button>
+                      </div>
                     </div>
-                 </div>
-                 
-                 <div className="space-y-4">
-                   <div className="bg-purple-500/5 border border-purple-500/20 p-4 rounded-xl">
-                      <h4 className="text-sm font-bold text-purple-400 mb-2">📋 نقاط القوة والضعف</h4>
-                      <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{ghostReport.vulnerabilities}</p>
-                   </div>
-                   <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-xl">
-                      <h4 className="text-sm font-bold text-blue-400 mb-2">🎯 الاستراتيجية المقترحة للتفوق</h4>
-                      <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{ghostReport.attackPlan}</p>
-                   </div>
-                   <div className="bg-gray-800/50 border border-gray-700/50 p-3 rounded-xl flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-gray-500">🔑 الكلمات المفتاحية:</span>
-                      {ghostReport.topKeywords?.split(',').map((kw: string, i: number) => (
-                        <span key={i} className="text-xs bg-purple-600/20 text-purple-300 px-2 py-0.5 rounded-full border border-purple-500/30">{kw.trim()}</span>
-                      ))}
-                   </div>
-                 </div>
+                  </div>
+
+                ) : (
+                  result.ads.map((ad, i) => (
+                    <div key={ad.adId || i} className="bg-slate-900 border border-white/8 rounded-xl p-5 hover:border-purple-500/30 transition-all">
+                      <div className="flex items-start gap-4">
+                        {/* Media Preview */}
+                        {(ad.imageUrl || ad.videoUrl) ? (
+                          <div className="shrink-0 w-20 h-20 rounded-lg bg-slate-800 overflow-hidden relative">
+                            {ad.videoUrl ? (
+                              <div className="w-full h-full flex items-center justify-center bg-slate-800">
+                                <Play className="w-8 h-8 text-purple-400" />
+                              </div>
+                            ) : (
+                              <img src={ad.imageUrl} alt="" className="w-full h-full object-cover" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                            )}
+                          </div>
+                        ) : (
+                          <div className="shrink-0 w-20 h-20 rounded-lg bg-slate-800 flex items-center justify-center">
+                            <ImageIcon className="w-7 h-7 text-slate-600" />
+                          </div>
+                        )}
+
+                        {/* Content */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            {result.isOrganicFallback ? (
+                              <span className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                                📝 منشور عضوي
+                              </span>
+                            ) : (
+                              <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${ad.isActive ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-slate-700 text-slate-400"}`}>
+                                {ad.isActive ? <><CheckCircle className="w-3 h-3" /> نشط</> : <><XCircle className="w-3 h-3" /> منتهي</>}
+                              </span>
+                            )}
+
+                            {ad.videoUrl && <span className="text-xs text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full border border-purple-500/20">🎬 فيديو</span>}
+                            {ad.imageUrl && !ad.videoUrl && <span className="text-xs text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20">📷 صورة</span>}
+                            {ad.startDate && <span className="text-xs text-slate-500">{new Date(ad.startDate).toLocaleDateString("ar")}</span>}
+                          </div>
+
+                          <p className="text-slate-200 text-sm leading-relaxed line-clamp-3">
+                            {ad.adText || <span className="text-slate-600">(منشور بدون نص)</span>}
+                          </p>
+
+                          {/* Organic post stats */}
+                          {result.isOrganicFallback && ((ad as any).likes !== undefined) && (
+                            <div className="flex items-center gap-4 mt-2 text-xs text-slate-500">
+                              <span>❤️ {(ad as any).likes?.toLocaleString()}</span>
+                              <span>💬 {(ad as any).comments?.toLocaleString()}</span>
+                              <span>↗️ {(ad as any).shares?.toLocaleString()}</span>
+                            </div>
+                          )}
+
+                          {ad.ctaText && (
+                            <div className="mt-2">
+                              <span className="text-xs text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
+                                زر CTA: {ad.ctaText}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 w-full">
-                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-lg">
-                   <div className="text-gray-500 text-xs font-bold uppercase mb-1">متوسط قوة الخطاف (Hook)</div>
-                   <div className="text-3xl font-black text-purple-400">{batchAnalysis.avgHookScore} <span className="text-lg text-gray-600">/ 10</span></div>
-                 </div>
-                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-lg">
-                   <div className="text-gray-500 text-xs font-bold uppercase mb-1">تركيز المحتوى (العروض)</div>
-                   <div className="text-3xl font-black text-yellow-500">{batchAnalysis.offerCount} <span className="text-lg text-gray-600 text-sm font-normal">إعلانات بيعية</span></div>
-                 </div>
-                 <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 shadow-lg">
-                   <div className="text-gray-500 text-xs font-bold uppercase mb-2 flex items-center gap-1"><TrendingUp className="w-3 h-3"/> نصيحة مبدئية</div>
-                   <div className="text-sm text-gray-300 leading-snug truncate whitespace-normal">{batchAnalysis.recommendation}</div>
-                 </div>
+            )}
+
+            {/* AI Report Tab */}
+            {activeTab === "report" && (
+              <div>
+                {isAnalyzing ? (
+                  <div className="bg-slate-900 border border-indigo-500/20 rounded-2xl p-12 text-center">
+                    <Brain className="w-12 h-12 text-indigo-400 animate-pulse mx-auto mb-4" />
+                    <p className="text-white font-semibold mb-1">الذكاء الاصطناعي يحلل الإعلانات...</p>
+                    <p className="text-slate-500 text-sm">يستغرق 15-30 ثانية</p>
+                  </div>
+                ) : report ? (
+                  <div className="bg-slate-900 border border-white/10 rounded-2xl p-7">
+                    <div className="flex items-center justify-between mb-6 pb-4 border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <ScanSearch className="w-5 h-5 text-indigo-400" />
+                        <h3 className="font-bold text-white">التقرير الاستراتيجي الكامل</h3>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500 bg-white/5 px-2 py-1 rounded-full">
+                          {reportSource === "gemini" ? "✨ Gemini AI" : "⚡ Groq AI"} • {result.ads.length} إعلان
+                        </span>
+                        <button onClick={copyReport} className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-all">
+                          {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                          {copied ? "تم النسخ" : "نسخ"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="whitespace-pre-wrap leading-relaxed text-[15px] text-slate-200">
+                      {report}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
-
-          <div id="ads-grid" className="scroll-mt-24"></div>
-
-          {/* Controls */}
-          <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-gray-950/50 p-2 rounded-xl">
-            <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-800 overflow-x-auto w-full md:w-auto">
-              {['ALL', 'ACTIVE', 'INACTIVE', 'OFFER', 'VIDEO'].map(f => (
-                <button key={f} onClick={() => setFilter(f)}
-                  className={`px-4 py-2 rounded-md text-sm font-bold transition-all whitespace-nowrap ${filter === f ? 'bg-purple-600 text-white shadow-md' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
-                >
-                  {f === 'ALL' ? 'الكل' : f === 'ACTIVE' ? 'النشطة فقط' : f === 'INACTIVE' ? 'المتوقفة' : f === 'OFFER' ? 'العروض 💰' : 'الفيديوهات 🎥'}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-3 w-full md:w-auto">
-              <div className="flex items-center gap-2 bg-gray-900 border border-gray-800 rounded-lg px-3 py-1">
-                <Filter className="w-4 h-4 text-gray-500" />
-                <select value={sortOpts} onChange={e => setSortOpts(e.target.value)} className="bg-transparent text-sm text-gray-300 outline-none py-1">
-                  <option value="newest">ترتيب: الأحدث</option>
-                  <option value="hook">ترتيب: أقوى خطاف</option>
-                </select>
-              </div>
-
-              <div className="flex bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-                <button onClick={() => setViewMode('grid')} className={`p-2 transition-colors ${viewMode === 'grid' ? 'bg-purple-600 text-white' : 'text-gray-500 hover:text-white'}`}>
-                  <LayoutGrid className="w-4 h-4" />
-                </button>
-                <button onClick={() => setViewMode('list')} className={`p-2 transition-colors ${viewMode === 'list' ? 'bg-purple-600 text-white' : 'text-gray-500 hover:text-white'}`}>
-                  <List className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Ads Grid */}
-          <div className={viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6" : "flex flex-col gap-4"}>
-            {displayAds.map((ad: any) => (
-               <AdCard key={ad.id || ad.adId || Math.random()} ad={ad} viewMode={viewMode} />
-            ))}
-          </div>
-
-          {displayAds.length === 0 && (
-            <div className="py-20 text-center text-gray-500 bg-gray-900/50 rounded-2xl border border-gray-800 border-dashed">
-              <Ghost className="w-12 h-12 mx-auto mb-3 opacity-20" />
-              <p>لا توجد إعلانات مطابقة للبحث أو الفلتر الحالي.</p>
-            </div>
-          )}
-
-        </div>
-      )}
-
-      {!isSearching && !activeCompetitor && (
-         <div className="flex flex-col items-center justify-center py-32 text-gray-600">
-            <Ghost className="w-24 h-24 mb-6 text-gray-800" />
-            <p className="text-xl font-bold">مكتبة المنافسين خالية حالياً.</p>
-            <p className="mt-2">أدخل رابط أي منافس بالأعلى لإرسال الشبح للتجسس عليه وجمع كل إعلاناته وحملاته التسويقية!</p>
-         </div>
-      )}
-
+        )}
+      </div>
     </div>
   );
 }

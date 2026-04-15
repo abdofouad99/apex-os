@@ -7,7 +7,10 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 
 export const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY_1 || "",
-  process.env.GEMINI_API_KEY_2 || ""
+  process.env.GEMINI_API_KEY_2 || "",
+  process.env.GEMINI_API_KEY_3 || "",
+  process.env.GEMINI_API_KEY_4 || "",
+  process.env.GEMINI_API_KEY_5 || ""
 ].filter(Boolean);
 
 if (GEMINI_KEYS.length === 0) {

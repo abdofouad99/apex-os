@@ -2,9 +2,12 @@ import prisma from "@/lib/prisma";
 import PredatorClient from "./PredatorClient";
 
 export default async function LeadsPage() {
-  const leads = await prisma.lead.findMany({
-    orderBy: { score: 'desc' }
-  });
+  let leads: any[] = [];
+  try {
+    leads = await prisma.lead.findMany({ orderBy: { score: "desc" } });
+  } catch {
+    // DB unavailable — show empty state
+  }
 
   const hasToken = !!process.env.APIFY_API_TOKEN;
 

@@ -1,10 +1,14 @@
 /**
- * LENS ENGINE - Real Social Media Scraping
- * Facebook + Instagram + TikTok + X
- * Uses: Apify (when available) + Free Public APIs
+ * LENS ENGINE - Real Social Media Scraping v2.0
+ * Uses Apify actors for REAL data:
+ * - Instagram: apify/instagram-profile-scraper + apify/instagram-post-scraper
+ * - Facebook: apify/facebook-pages-scraper + Ads Library
+ * - TikTok: apify/tiktok-profile-scraper
+ * - X/Twitter: FxTwitter API (free)
  */
+
 const APIFY_TOKEN = process.env.APIFY_API_TOKEN;
-const APIFY_GHOST_ACTOR = process.env.APIFY_GHOST_ACTOR_ID || "curious_coder~facebook-ads-library-scraper";
+const APIFY_BASE = "https://api.apify.com/v2";
 
 export interface SocialProfileData {
   platform: "instagram" | "tiktok" | "x" | "facebook";
@@ -17,79 +21,123 @@ export interface SocialProfileData {
   engagementRate?: string;
   avgLikes?: number;
   avgComments?: number;
+  avgViews?: number;
   profilePicUrl?: string;
   isVerified?: boolean;
   externalUrl?: string;
+  category?: string;
   recentPosts: Array<{
     caption?: string;
     likes?: number;
     comments?: number;
+    views?: number;
     timestamp?: string;
     mediaType?: "image" | "video" | "carousel";
+    url?: string;
   }>;
   bioQuality: string;
   contentQuality: string;
+  dataSource: "apify" | "api" | "limited";
 }
 
-export interface FacebookAdsData {
-  adsCount: number;
-  activeAdsCount: number;
-  inactiveAdsCount: number;
-  platforms: string[];
-  adCategories: string[];
-  topAdFormats: string[];
-  advertiserName?: string;
-  pageId?: string;
-  pageLikeCount?: number;
-  firstSeen?: string;
-  lastSeen?: string;
-  sampleAds: Array<{
-    adText?: string;
-    imageUrl?: string;
-    videoUrl?: string;
-    videoPreviewUrl?: string;
-    startDate?: string;
-    status?: string;
-    platform?: string;
-    ctaText?: string;
-    linkUrl?: string;
-    pageName?: string;
-    pageCategory?: string;
-  }>;
+// ── Apify Runner ──
+async function runApifyActor(actorId: string, input: object, timeoutSecs = 120): Promise<any[]> {
+  if (!APIFY_TOKEN) throw new Error("APIFY_API_TOKEN not configured");
+
+  // Apify uses ~ instead of / in actor IDs in URLs
+  const encodedActorId = actorId.replace("/", "~");
+
+  // Start run
+  const startRes = await fetch(`${APIFY_BASE}/acts/${encodedActorId}/runs?token=${APIFY_TOKEN}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+
+  if (!startRes.ok) {
+    const txt = await startRes.text();
+    throw new Error(`Apify start failed (${startRes.status}): ${txt.substring(0, 200)}`);
+  }
+
+  const { data: runData } = await startRes.json();
+  const runId = runData.id;
+  const datasetId = runData.defaultDatasetId;
+  console.log(`🚀 Apify [${actorId}] started: runId=${runId}`);
+
+  // Poll for completion
+  const maxAttempts = Math.ceil(timeoutSecs / 5);
+  let attempts = 0;
+  let status = "RUNNING";
+
+  while ((status === "RUNNING" || status === "READY") && attempts < maxAttempts) {
+    await new Promise(r => setTimeout(r, 5000));
+    attempts++;
+
+    try {
+      const statusRes = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${APIFY_TOKEN}`);
+      const { data } = await statusRes.json();
+      status = data.status;
+      console.log(`📊 Apify [${actorId}] status: ${status} (${attempts}/${maxAttempts})`);
+      if (status === "SUCCEEDED") break;
+      if (status === "FAILED" || status === "ABORTED" || status === "TIMED-OUT") {
+        throw new Error(`Apify run ${status}`);
+      }
+    } catch (e: any) {
+      if (e.message.includes("Apify run")) throw e;
+    }
+  }
+
+  // Fetch results
+  const resultsRes = await fetch(
+    `${APIFY_BASE}/datasets/${datasetId}/items?token=${APIFY_TOKEN}&limit=20`
+  );
+  if (!resultsRes.ok) throw new Error(`Failed to fetch dataset: ${resultsRes.status}`);
+
+  const items = await resultsRes.json();
+  console.log(`📦 Apify [${actorId}] got ${items.length} items`);
+  return items;
 }
 
-// ── Main Entry Point ──
-
+// ── Main Entry ──
 export async function scrapeSocialProfile(platformUrl: string): Promise<SocialProfileData> {
   const platform = detectPlatform(platformUrl);
-  console.log(`🔍 LENS: Detected platform: ${platform}`);
+  const username = extractUsername(platformUrl);
+  console.log(`🔍 LENS v2: platform=${platform}, username=${username}`);
 
-  let data: Partial<SocialProfileData>;
+  let data: Partial<SocialProfileData> = { platform: platform as any, username };
 
-  switch (platform) {
-    case "facebook":
-      data = await scrapeFacebook(platformUrl);
-      break;
-    case "x":
-      data = await scrapeX(platformUrl);
-      break;
-    case "tiktok":
-      data = await scrapeTikTok(platformUrl);
-      break;
-    case "instagram":
-      data = await scrapeInstagram(platformUrl);
-      break;
-    default:
-      data = { username: "unknown", platform: platform as any };
+  try {
+    switch (platform) {
+      case "instagram":
+        data = await scrapeInstagram(platformUrl, username);
+        break;
+      case "facebook":
+        data = await scrapeFacebook(platformUrl, username);
+        break;
+      case "tiktok":
+        data = await scrapeTikTok(platformUrl, username);
+        break;
+      case "x":
+        data = await scrapeX(platformUrl, username);
+        break;
+    }
+  } catch (e: any) {
+    console.warn(`⚠️ Scraping failed for ${platform}:`, e.message);
+    data.dataSource = "limited";
+  }
+
+  // Calculate engagement rate if we have real data
+  if (data.followers && data.followers > 0 && (data.avgLikes !== undefined || data.avgComments !== undefined)) {
+    const avgLikes = data.avgLikes || 0;
+    const avgComments = data.avgComments || 0;
+    const engRate = ((avgLikes + avgComments) / data.followers) * 100;
+    data.engagementRate = `${engRate.toFixed(2)}%`;
   }
 
   const bio = data.bio || "";
-  const bioQuality = analyzeBioQuality(bio, platform);
-  const contentQuality = data.contentQuality || analyzeContentQuality(data, platform);
-
   return {
     platform: platform as SocialProfileData["platform"],
-    username: data.username || extractUsername(platformUrl),
+    username: data.username || username,
     displayName: data.displayName,
     bio,
     followers: data.followers || 0,
@@ -98,468 +146,326 @@ export async function scrapeSocialProfile(platformUrl: string): Promise<SocialPr
     engagementRate: data.engagementRate,
     avgLikes: data.avgLikes,
     avgComments: data.avgComments,
+    avgViews: data.avgViews,
     profilePicUrl: data.profilePicUrl,
     isVerified: data.isVerified,
     externalUrl: data.externalUrl,
+    category: data.category,
     recentPosts: data.recentPosts || [],
-    bioQuality,
-    contentQuality
+    bioQuality: data.bioQuality || analyzeBioQuality(bio, platform),
+    contentQuality: data.contentQuality || "لم يتم تحليل المحتوى",
+    dataSource: data.dataSource || "apify"
   };
 }
 
-// ── Facebook via Apify Ads Library Scraper ──
+// ── Instagram (Real Apify Scraper) ──
+async function scrapeInstagram(url: string, username: string): Promise<Partial<SocialProfileData>> {
+  console.log(`📸 Instagram: Scraping @${username} via Apify...`);
 
-async function scrapeFacebook(url: string): Promise<Partial<SocialProfileData>> {
-  // Normalize URL to full Facebook page URL
-  const normalizedUrl = normalizeFacebookUrl(url);
-  const pageName = extractUsername(normalizedUrl);
-  console.log(`📘 Facebook: Normalized URL: ${normalizedUrl}, Page: ${pageName}`);
+  // apify~instagram-profile-scraper: Official Apify Instagram actor
+  const items = await runApifyActor("apify/instagram-profile-scraper", {
+    usernames: [username],
+    resultsLimit: 12
+  }, 120);
 
-  // Try Apify Facebook Ads Library Scraper
-  if (APIFY_TOKEN) {
-    try {
-      const adsData = await scrapeFacebookAds(normalizedUrl);
-      if (adsData && adsData.adsCount > 0) {
-        console.log(`✅ Facebook: Got ${adsData.adsCount} ads from Apify for ${pageName}`);
-
-        // Analyze ad content quality
-        const adAnalysis = analyzeAdsData(adsData);
-
-        return {
-          platform: "facebook",
-          username: pageName,
-          displayName: adsData.advertiserName || pageName,
-          followers: adsData.pageLikeCount,
-          bioQuality: analyzeBioQuality("", "facebook"),
-          contentQuality: adAnalysis,
-          postsCount: adsData.adsCount,
-          recentPosts: adsData.sampleAds.slice(0, 10).map(ad => ({
-            caption: ad.adText || ad.pageCategory || `${ad.platform || "Facebook"} ${ad.status} Ad`,
-            mediaType: ad.videoUrl ? "video" : "image",
-            timestamp: ad.startDate
-          }))
-        };
-      } else if (adsData && adsData.adsCount === 0) {
-        console.log(`ℹ️ Facebook: Page exists but has 0 ads in Ad Library`);
-        return {
-          platform: "facebook",
-          username: pageName,
-          displayName: adsData.advertiserName || pageName,
-          followers: adsData.pageLikeCount,
-          contentQuality: "هذه الصفحة لا تشغل إعلانات حالياً — يحتاج تحليل المحتوى العضوي",
-          postsCount: 0,
-          recentPosts: []
-        };
-      }
-    } catch (e: any) {
-      console.warn("⚠️ Apify Facebook Ads failed:", e.message);
-    }
+  if (!items || items.length === 0) {
+    throw new Error("No Instagram data returned from Apify");
   }
 
-  // Fallback
-  console.log(`ℹ️ Facebook: Using intelligent analysis for ${pageName}`);
-  return {
-    platform: "facebook",
-    username: pageName,
-    bioQuality: "يحتاج فحص يدوي للصفحة",
-    contentQuality: "يحتاج مراجعة يدوية"
-  };
-}
+  const profile = items[0];
+  console.log(`✅ Instagram: Got data for @${username}, followers=${profile.followersCount}`);
 
-function normalizeFacebookUrl(url: string): string {
-  // If it's just a page name
-  if (!url.includes("facebook.com") && !url.includes("fb.com")) {
-    return `https://www.facebook.com/${url}`;
-  }
-  // Add https:// if missing
-  if (!url.startsWith("http")) {
-    return `https://${url}`;
-  }
-  return url;
-}
+  // Process recent posts - handle multiple response schemas
+  const rawPosts = profile.latestPosts || profile.posts || profile.media || [];
+  const posts = rawPosts.slice(0, 12).map((p: any) => ({
+    caption: (p.caption || p.text || "").substring(0, 300),
+    likes: p.likesCount || p.likes || p.diggCount || 0,
+    comments: p.commentsCount || p.comments || p.commentCount || 0,
+    views: p.videoViewCount || p.videoPlayCount || p.viewCount || 0,
+    timestamp: p.timestamp || p.takenAt || p.time || "",
+    mediaType: (p.type === "Video" || p.isVideo) ? "video" as const : (p.type === "Sidecar" ? "carousel" as const : "image" as const),
+    url: p.url || (p.shortCode ? `https://www.instagram.com/p/${p.shortCode}/` : "")
+  }));
 
-async function scrapeFacebookAds(pageUrl: string): Promise<FacebookAdsData | null> {
-  if (!APIFY_TOKEN || !APIFY_GHOST_ACTOR) return null;
+  const avgLikes = posts.length > 0 ? posts.reduce((s: number, p: any) => s + (p.likes || 0), 0) / posts.length : 0;
+  const avgComments = posts.length > 0 ? posts.reduce((s: number, p: any) => s + (p.comments || 0), 0) / posts.length : 0;
 
-  // Start the Apify run
-  console.log(`🚀 Apify: Starting Facebook Ads scrape for ${pageUrl}`);
-  console.log(`📋 Apify Actor: ${APIFY_GHOST_ACTOR}`);
-
-  const payload = {
-    urls: [{ url: pageUrl }],
-    activeStatus: "all",
-    useApifyProxy: true,
-    maxAds: 50
-  };
-
-  console.log(`📤 Apify Payload:`, JSON.stringify(payload).substring(0, 200));
-
-  const runRes = await fetch(
-    `https://api.apify.com/v2/acts/${APIFY_GHOST_ACTOR}/runs?token=${APIFY_TOKEN}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  if (!runRes.ok) {
-    const errorText = await runRes.text();
-    console.error(`❌ Apify run failed: ${runRes.status} ${errorText}`);
-    throw new Error(`Apify run failed: ${runRes.status} ${errorText}`);
-  }
-
-  const { data: runData } = await runRes.json();
-  const runId = runData.id;
-  console.log(`📋 Apify: Run started: ${runId}`);
-
-  // Poll for completion (max 120s)
-  let status = "RUNNING";
-  let attempts = 0;
-  let defaultDatasetId = runData.defaultDatasetId;
-  const maxAttempts = 24; // 24 * 5s = 120s
-
-  while (status === "RUNNING" || status === "READY") {
-    await new Promise(r => setTimeout(r, 5000));
-    attempts++;
-
-    if (attempts >= maxAttempts) {
-      console.warn("⚠️ Apify: Timeout after 120s, checking partial results...");
-      break;
-    }
-
-    try {
-      const statusRes = await fetch(
-        `https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`
-      );
-      const { data: statusData } = await statusRes.json();
-      status = statusData.status;
-      defaultDatasetId = statusData.defaultDatasetId || defaultDatasetId;
-      console.log(`📊 Apify: Status: ${status} (attempt ${attempts}/${maxAttempts})`);
-
-      if (status === "SUCCEEDED") break;
-      if (status === "FAILED" || status === "ABORTED") {
-        throw new Error(`Apify run ${status}`);
-      }
-    } catch (e: any) {
-      if (e.message.includes("Apify run")) throw e;
-      console.warn("⚠️ Apify: Status check failed, retrying:", e.message);
-    }
-  }
-
-  // Fetch results
-  if (!defaultDatasetId) {
-    console.error("❌ Apify: No defaultDatasetId available after run");
-    return null;
-  }
-
-  console.log(`📥 Apify: Fetching results from dataset ${defaultDatasetId}`);
-  const resultsRes = await fetch(
-    `https://api.apify.com/v2/datasets/${defaultDatasetId}/items?token=${APIFY_TOKEN}&limit=50`
-  );
-
-  if (!resultsRes.ok) {
-    throw new Error(`Failed to fetch results: ${resultsRes.status} ${await resultsRes.text()}`);
-  }
-
-  const items = await resultsRes.json();
-  console.log(`📦 Apify: Got ${items.length} items`);
-
-  if (items.length === 0) return null;
-
-  // Process results
-  const firstItem = items[0];
-  const snapshot = firstItem?.snapshot || firstItem;
-
-  const adsData: FacebookAdsData = {
-    adsCount: items.length,
-    activeAdsCount: items.filter((i: any) => {
-      const s = i.status || i.isActive || i.is_active;
-      return s === "ACTIVE" || s === true;
-    }).length,
-    inactiveAdsCount: items.filter((i: any) => {
-      const s = i.status || i.isActive || i.is_active;
-      return s !== "ACTIVE" && s !== true;
-    }).length,
-    platforms: [...new Set(items.map((i: any) =>
-      i.platform || i.publisherPlatform || i.snapshot?.platform
-    ).filter(Boolean))] as string[],
-    adCategories: [...new Set(items.flatMap((i: any) => {
-      const s = i.snapshot || i;
-      return s.page_categories || s.categories || i.adCategories || i.interests || [];
-    }).filter(Boolean))] as string[],
-    topAdFormats: [...new Set(items.map((i: any) => {
-      const s = i.snapshot || i;
-      return s.display_format || i.mediaType || i.format || (s.videos?.length ? "VIDEO" : "IMAGE");
-    }).filter(Boolean))] as string[],
-    advertiserName: snapshot.page_name || firstItem.pageName || firstItem.advertiserName || firstItem.page_name,
-    pageId: firstItem.page_id,
-    firstSeen: items[items.length - 1]?.start_date || items[items.length - 1]?.startDate,
-    lastSeen: items[0]?.start_date || items[0]?.startDate,
-    pageLikeCount: snapshot.page_like_count,
-    sampleAds: items.slice(0, 15).map((item: any) => {
-      const s = item.snapshot || item;
-      
-      // Extract body text - can be string, object with text property, or null
-      let adText = '';
-      if (typeof s.body === 'string') adText = s.body;
-      else if (s.body && typeof s.body === 'object') adText = s.body.text || '';
-      else adText = item.adText || item.primaryText || item.text || item.caption || '';
-
-      // Extract image URL
-      let imageUrl = '';
-      if (s.images && s.images.length > 0) {
-        const img = s.images[0];
-        imageUrl = img.original_image_url || img.url || img.image_url || '';
-      }
-      if (!imageUrl) {
-        imageUrl = item.imageUrl || item.thumbnailUrl || '';
-      }
-
-      // Extract video URL
-      let videoUrl = '';
-      let videoPreviewUrl = '';
-      if (s.videos && s.videos.length > 0) {
-        const vid = s.videos[0];
-        videoUrl = vid.video_sd_url || vid.video_hd_url || vid.url || '';
-        videoPreviewUrl = vid.video_preview_image_url || '';
-      }
-      if (!videoUrl) {
-        videoUrl = item.videoUrl || '';
-      }
-      if (!videoPreviewUrl) {
-        videoPreviewUrl = item.videoPreviewUrl || '';
-      }
-
-      // Extract categories
-      const categories = s.page_categories || s.categories || item.adCategories || item.interests || [];
-
-      return {
-        adText,
-        imageUrl,
-        videoUrl,
-        videoPreviewUrl,
-        startDate: item.start_date || item.startDate,
-        status: (item.isActive || item.active) ? "ACTIVE" : "INACTIVE",
-        platform: item.platform || item.publisherPlatform,
-        ctaText: s.cta_text || item.ctaText || '',
-        linkUrl: s.link_url || item.linkUrl || '',
-        pageName: s.page_name || item.pageName || '',
-        pageCategory: Array.isArray(categories) ? categories.join(", ") : ''
-      };
-    })
-  };
-
-  console.log(`📊 Apify: Extracted ${adsData.adsCount} ads, page likes: ${adsData.pageLikeCount}, name: ${adsData.advertiserName}`);
-  if (adsData.sampleAds.length > 0) {
-    console.log(`📋 First ad text:`, adsData.sampleAds[0].adText?.substring(0, 100) || "(empty)");
-  }
-
-  return adsData;
-}
-
-function analyzeAdsData(ads: FacebookAdsData): string {
-  const parts: string[] = [];
-
-  // Page authority
-  if (ads.pageLikeCount) {
-    if (ads.pageLikeCount > 1_000_000) {
-      parts.push(`صفحة ضخمة (${(ads.pageLikeCount / 1_000_000).toFixed(1)}M متابع)`);
-    } else if (ads.pageLikeCount > 100_000) {
-      parts.push(`صفحة كبيرة (${(ads.pageLikeCount / 1_000).toFixed(0)}K متابع)`);
-    } else if (ads.pageLikeCount > 10_000) {
-      parts.push(`صفحة متوسطة الحجم (${ads.pageLikeCount.toLocaleString()} متابع)`);
-    }
-  }
-
-  // Overall activity
-  if (ads.activeAdsCount > 20) {
-    parts.push("نشط جداً في الإعلانات");
-  } else if (ads.activeAdsCount > 5) {
-    parts.push("نشط في الإعلانات بشكل متوسط");
-  } else if (ads.activeAdsCount > 0) {
-    parts.push("إعلاناته محدودة");
-  } else {
-    parts.push("لا يوجد إعلانات نشطة حالياً ⚠️");
-  }
-
-  // Platforms
-  if (ads.platforms.length > 0) {
-    parts.push(`ينشر على: ${ads.platforms.join("، ")}`);
-  }
-
-  // Ad formats
-  if (ads.topAdFormats.length > 0) {
-    parts.push(`صيغ الإعلان: ${ads.topAdFormats.join("، ")}`);
-  }
-
-  // Categories
-  if (ads.adCategories.length > 0) {
-    parts.push(`التصنيفات: ${ads.adCategories.slice(0, 3).join("، ")}`);
-  }
-
-  // Issues
-  if (ads.inactiveAdsCount > ads.activeAdsCount && ads.activeAdsCount > 0) {
-    parts.push("معظم الإعلانات متوقفة — يحتاج مراجعة الاستراتيجية");
-  }
-
-  // CTA analysis
-  const adsWithCTA = ads.sampleAds.filter(ad => ad.ctaText).length;
-  if (adsWithCTA === 0 && ads.sampleAds.length > 0) {
-    parts.push("ينقصه Call to Action في الإعلانات");
-  } else if (adsWithCTA > 0) {
-    parts.push(`يستخدم CTA في ${adsWithCTA} من ${ads.sampleAds.length} إعلانات`);
-  }
-
-  return parts.join(" | ");
-}
-
-// ── X (Twitter) via FxTwitter / VxTwitter (Free, No Auth) ──
-
-async function scrapeX(url: string): Promise<Partial<SocialProfileData>> {
-  const username = extractUsername(url);
-
-  // Try FxTwitter first
-  try {
-    const res = await fetch(`https://api.fxtwitter.com/${username}`, {
-      headers: { "Accept": "application/json" }
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const u = data?.user;
-      if (u) {
-        console.log(`✅ X: Got data from FxTwitter for @${username}`);
-        return {
-          platform: "x",
-          username: u.screen_name || username,
-          displayName: u.name,
-          bio: u.description,
-          followers: u.followers_count,
-          following: u.friends_count,
-          postsCount: u.statuses_count,
-          isVerified: u.verified || u.is_blue_verified || false,
-          profilePicUrl: u.profile_image_url,
-          externalUrl: u.url || u.entities?.url?.urls?.[0]?.expanded_url,
-          recentPosts: []
-        };
-      }
-    }
-  } catch (e) {
-    console.warn("⚠️ FxTwitter failed:", (e as Error).message);
-  }
-
-  // Fallback: VxTwitter
-  try {
-    const res = await fetch(`https://api.vxtwitter.com/${username}`);
-    if (res.ok) {
-      const data = await res.json();
-      console.log(`✅ X: Got data from VxTwitter for @${username}`);
-      return {
-        platform: "x",
-        username: data.handle || username,
-        displayName: data.name,
-        bio: data.description,
-        followers: data.followers,
-        postsCount: data.posts,
-        isVerified: true,
-        recentPosts: []
-      };
-    }
-  } catch (e) {
-    console.warn("⚠️ VxTwitter failed:", (e as Error).message);
-  }
-
-  console.warn(`⚠️ X: All APIs failed for @${username}`);
-  return { platform: "x", username };
-}
-
-// ── TikTok via oEmbed (Free, No Auth) ──
-
-async function scrapeTikTok(url: string): Promise<Partial<SocialProfileData>> {
-  const username = extractUsername(url);
-
-  try {
-    const oembedUrl = `https://www.tiktok.com/oembed?url=https://www.tiktok.com/@${username}`;
-    const res = await fetch(oembedUrl);
-    if (res.ok) {
-      const data = await res.json();
-      console.log(`✅ TikTok: Got oEmbed data for @${username}`);
-      return {
-        platform: "tiktok",
-        username,
-        displayName: data.author_name || username,
-        profilePicUrl: `https://www.tiktok.com/@${username}/avatar`,
-        recentPosts: []
-      };
-    }
-  } catch (e) {
-    console.warn("⚠️ TikTok oEmbed failed:", (e as Error).message);
-  }
-
-  return { platform: "tiktok", username };
-}
-
-// ── Instagram (limited, uses intelligent analysis) ──
-
-async function scrapeInstagram(url: string): Promise<Partial<SocialProfileData>> {
-  const username = extractUsername(url);
-  console.log(`ℹ️ Instagram: Using intelligent analysis for @${username}`);
-
+  const followers = profile.followersCount || profile.followers || profile.followerCount || 0;
+  const bio = profile.biography || profile.bio || profile.description || "";
   return {
     platform: "instagram",
-    username,
-    bioQuality: "يحتاج فحص يدوي (Instagram يمنع السحب التلقائي)",
-    contentQuality: "يحتاج مراجعة يدوية"
+    username: profile.username || username,
+    displayName: profile.fullName || profile.name || profile.displayName,
+    bio,
+    followers,
+    following: profile.followsCount || profile.following || profile.followingCount || 0,
+    postsCount: profile.postsCount || profile.mediaCount || 0,
+    isVerified: profile.verified || profile.isVerified || false,
+    profilePicUrl: profile.profilePicUrlHD || profile.profilePicUrl || "",
+    externalUrl: profile.externalUrl || profile.website || profile.url || "",
+    category: profile.businessCategoryName || profile.category || "",
+    avgLikes: Math.round(avgLikes),
+    avgComments: Math.round(avgComments),
+    recentPosts: posts,
+    bioQuality: analyzeBioQuality(bio, "instagram"),
+    contentQuality: analyzeContentQuality({ recentPosts: posts, followers }, "instagram"),
+    dataSource: "apify"
   };
 }
 
-// ── Quality Analysis Helpers ──
+// ── Facebook (Real Apify Scraper) ──
+async function scrapeFacebook(url: string, username: string): Promise<Partial<SocialProfileData>> {
+  console.log(`📘 Facebook: Scraping ${username} via Apify (parallel: page + posts)...`);
 
+  const normalizedUrl = url.startsWith("http") ? url : `https://www.facebook.com/${username}`;
+
+  // Run both actors in parallel: page metadata + posts
+  const [pageItems, postItems] = await Promise.allSettled([
+    // Actor 1: Page metadata (followers, bio, category)
+    runApifyActor("apify/facebook-pages-scraper", {
+      startUrls: [{ url: normalizedUrl }],
+      maxPosts: 0,
+      maxPostComments: 0,
+      maxReviews: 0,
+      proxyConfiguration: { useApifyProxy: true }
+    }, 120),
+    // Actor 2: Actual page posts
+    runApifyActor("apify/facebook-posts-scraper", {
+      startUrls: [{ url: normalizedUrl }],
+      resultsLimit: 12,
+      proxyConfiguration: { useApifyProxy: true }
+    }, 120)
+  ]);
+
+  const pageData = pageItems.status === "fulfilled" ? pageItems.value : [];
+  const postsData = postItems.status === "fulfilled" ? postItems.value : [];
+
+  console.log(`📊 Facebook: page items=${pageData.length}, post items=${postsData.length}`);
+
+  if (pageData.length === 0 && postsData.length === 0) {
+    throw new Error("No Facebook data returned from Apify");
+  }
+
+  const page = pageData[0] || {};
+  console.log(`✅ Facebook page: ${page.title || page.name || username}, followers=${page.likes}, keys=${Object.keys(page).slice(0,10).join(",")}`);
+
+  // Extract bio from 'info' array (facebook-pages-scraper format)
+  let bio = page.about || page.description || page.intro || page.biography || "";
+  if (!bio && page.info) {
+    if (Array.isArray(page.info)) {
+      bio = (page.info as any[]).map((i: any) => i.text || i.content || i.value || (typeof i === "string" ? i : "")).filter(Boolean).join(" | ");
+    } else if (typeof page.info === "string") {
+      bio = page.info;
+    } else if (typeof page.info === "object") {
+      bio = Object.values(page.info as object).filter(v => typeof v === "string").join(" | ");
+    }
+  }
+  console.log(`📋 Facebook bio: "${bio.substring(0, 100)}"`);
+
+
+
+  const posts = postsData.slice(0, 12).map((p: any) => ({
+    caption: (p.text || p.message || p.story || p.postText || p.body || "").substring(0, 300),
+    likes: p.likes || p.likesCount || p.reactionsCount || p.reactions || 0,
+    comments: p.comments || p.commentsCount || p.commentCount || 0,
+    timestamp: p.time || p.date || p.createdTime || p.publishedAt || "",
+    mediaType: (p.video || p.type === "video" || p.hasVideo) ? "video" as const : "image" as const,
+    url: p.postUrl || p.url || p.link || ""
+  }));
+
+  console.log(`📝 Facebook extracted posts: ${posts.length}, bio: "${bio.substring(0,80)}"`);
+
+  const followers = page.followers || page.fans || page.likes || 0;
+  const avgLikes = posts.length > 0 ? posts.reduce((s: number, p: any) => s + (p.likes || 0), 0) / posts.length : 0;
+  const avgComments = posts.length > 0 ? posts.reduce((s: number, p: any) => s + (p.comments || 0), 0) / posts.length : 0;
+
+  // Verified: check all possible fields + categories array for verification keywords
+  const cats = Array.isArray(page.categories) ? (page.categories as string[]).join(" ").toLowerCase() : "";
+  const isVerified = page.verified || page.isVerified || page.verifiedPage ||
+    cats.includes("verified") || cats.includes("official") || false;
+
+  return {
+    platform: "facebook",
+    username: page.username || page.pageName || username,
+    displayName: page.title || page.name || username,
+    bio,
+    followers,
+    postsCount: posts.length,
+    isVerified,
+    profilePicUrl: page.profileImage || page.logo || "",
+    externalUrl: page.website || page.externalUrl || "",
+    category: Array.isArray(page.categories) ? (page.categories as string[])[0] : (page.category || page.pageCategory || ""),
+    avgLikes: Math.round(avgLikes),
+    avgComments: Math.round(avgComments),
+    recentPosts: posts,
+    bioQuality: analyzeBioQuality(bio, "facebook"),
+    contentQuality: analyzeContentQuality({ recentPosts: posts, followers }, "facebook"),
+    dataSource: "apify"
+  };
+}
+
+// ── TikTok (Real Apify Scraper) ──
+async function scrapeTikTok(url: string, username: string): Promise<Partial<SocialProfileData>> {
+  console.log(`🎵 TikTok: Scraping @${username} via Apify...`);
+
+  const cleanUsername = username.startsWith("@") ? username : `@${username}`;
+
+  // clockworks~tiktok-profile-scraper: Reliable TikTok actor
+  const items = await runApifyActor("clockworks/tiktok-profile-scraper", {
+    profiles: [cleanUsername],
+    shouldDownloadVideos: false,
+    shouldDownloadCovers: false,
+    shouldDownloadSubtitles: false,
+    shouldDownloadSlideshowImages: false,
+    maxProfilesPerQuery: 1
+  }, 90);
+
+  if (!items || items.length === 0) {
+    throw new Error("No TikTok data from Apify");
+  }
+
+  const item = items[0];
+  // clockworks/tiktok-profile-scraper returns data inside authorMeta
+  const profile = item.authorMeta || item;
+  console.log(`✅ TikTok: @${profile.name || profile.uniqueId || username}, followers=${profile.fans || profile.followerCount}`);
+  console.log(`  🗝 Profile keys: ${Object.keys(profile).slice(0, 12).join(", ")}`);
+
+  const rawVideos = item.videos || item.latestVideos || profile.videos || [];
+  const videos = rawVideos.slice(0, 12).map((v: any) => ({
+    caption: (v.text || v.description || v.title || "").substring(0, 300),
+    likes: v.diggCount || v.likesCount || v.likes || 0,
+    comments: v.commentCount || v.comments || 0,
+    views: v.playCount || v.viewCount || v.views || 0,
+    timestamp: v.createTime ? new Date(v.createTime * 1000).toISOString() : "",
+    mediaType: "video" as const,
+    url: v.webVideoUrl || v.url || ""
+  }));
+
+  const followers = profile.fans || profile.followerCount || profile.followersCount || 0;
+  const bio = profile.signature || profile.bio || profile.description || "";
+
+  const avgLikes = videos.length > 0 ? videos.reduce((s: number, v: any) => s + (v.likes || 0), 0) / videos.length : 0;
+  const avgComments = videos.length > 0 ? videos.reduce((s: number, v: any) => s + (v.comments || 0), 0) / videos.length : 0;
+  const avgViews = videos.length > 0 ? videos.reduce((s: number, v: any) => s + (v.views || 0), 0) / videos.length : 0;
+
+  return {
+    platform: "tiktok",
+    username: profile.uniqueId || profile.name || username,
+    displayName: profile.nickName || profile.nickname || profile.name || username,
+    bio,
+    followers,
+    following: profile.following || profile.followingCount || 0,
+    postsCount: profile.videoCount || profile.videosCount || rawVideos.length,
+    isVerified: profile.verified || profile.isVerified || false,
+    profilePicUrl: profile.avatarLarger || profile.avatar || profile.avatarMedium || "",
+    avgLikes: Math.round(avgLikes),
+    avgComments: Math.round(avgComments),
+    avgViews: Math.round(avgViews),
+    recentPosts: videos,
+    bioQuality: analyzeBioQuality(bio, "tiktok"),
+    contentQuality: analyzeContentQuality({ recentPosts: videos, followers }, "tiktok"),
+    dataSource: "apify"
+  };
+}
+
+
+// ── X/Twitter (FxTwitter - Free API) ──
+async function scrapeX(url: string, username: string): Promise<Partial<SocialProfileData>> {
+  console.log(`🐦 X/Twitter: Scraping @${username} via FxTwitter...`);
+
+  const res = await fetch(`https://api.fxtwitter.com/${username}`, {
+    headers: { "Accept": "application/json" },
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!res.ok) throw new Error(`FxTwitter returned ${res.status}`);
+
+  const data = await res.json();
+  const u = data?.user;
+  if (!u) throw new Error("No user data from FxTwitter");
+
+  console.log(`✅ X: Got @${username}, followers=${u.followers_count}`);
+
+  return {
+    platform: "x",
+    username: u.screen_name || username,
+    displayName: u.name,
+    bio: u.description,
+    followers: u.followers_count,
+    following: u.friends_count,
+    postsCount: u.statuses_count,
+    isVerified: u.verified || u.is_blue_verified || false,
+    profilePicUrl: u.profile_image_url_https || u.profile_image_url,
+    externalUrl: u.url || u.entities?.url?.urls?.[0]?.expanded_url,
+    recentPosts: [],
+    bioQuality: analyzeBioQuality(u.description || "", "x"),
+    contentQuality: `${u.statuses_count?.toLocaleString()} تغريدة | ${u.followers_count?.toLocaleString()} متابع`,
+    dataSource: "api"
+  };
+}
+
+// ── Quality Analyzers ──
 function analyzeBioQuality(bio: string, platform: string): string {
   if (!bio || bio.length < 10) {
-    if (platform === "facebook") {
-      return "يحتاج فحص يدوي لصفحة الفيسبوك — لا يوجد bio مباشر";
-    }
-    return "البايو فارغ أو قصير جداً — أولوية قصوى: أضف عرض القيمة";
+    return "❌ البايو فارغ أو قصير جداً — أولوية قصوى لإضافة عرض القيمة";
   }
 
   let score = 0;
-  let maxScore = 5;
-
   if (/\d/.test(bio)) score++;
   if (/http|link|رابط|🔗|👇|⬇️/i.test(bio)) score++;
-  if (bio.length > 50 && bio.length < 150) score++;
-  if (/ساعد|نساعد|نبني|نقدم|تعلم|نمو|help|build|create|grow/i.test(bio)) score++;
+  if (bio.length > 50 && bio.length < 200) score++;
+  if (/ساعد|نساعد|نبني|نقدم|help|build|create|grow/i.test(bio)) score++;
   if (/مؤسس|مدير|خبير|CEO|Founder|Owner|Director/i.test(bio)) score++;
+  if (/📞|📧|واتساب|WhatsApp|تواصل|contact/i.test(bio)) score++;
 
-  const ratio = score / maxScore;
-  if (ratio >= 0.8) return "ممتاز — البايو يعكس عرض القيمة بوضوح مع CTA قوي";
-  if (ratio >= 0.6) return "جيد — البايو مقبول لكن ينقصه Call to Action";
-  if (ratio >= 0.4) return "متوسط — البايو يحتاج تحسين واضح";
-  return "ضعيف — لا يعكس عرض القيمة بوضوح";
+  if (score >= 5) return "✅ ممتاز — البايو يعكس عرض القيمة بوضوح";
+  if (score >= 3) return "🟡 جيد — البايو مقبول لكن ينقصه Call to Action";
+  if (score >= 2) return "🟠 متوسط — البايو يحتاج تحسين واضح";
+  return "🔴 ضعيف — لا يعكس عرض القيمة، تحتاج إعادة كتابة كاملة";
 }
 
-function analyzeContentQuality(data: Partial<SocialProfileData>, platform: string): string {
+function analyzeContentQuality(data: { recentPosts: any[], followers?: number }, platform: string): string {
   const posts = data.recentPosts || [];
-  if (posts.length === 0) {
-    return `يحتاج مراجعة يدوية — ${platform} لا يوفر بيانات المنشورات عبر API مجاني`;
-  }
+  if (posts.length === 0) return "لا تتوفر بيانات منشورات";
 
   const avgLikes = posts.reduce((s, p) => s + (p.likes || 0), 0) / posts.length;
   const avgComments = posts.reduce((s, p) => s + (p.comments || 0), 0) / posts.length;
+  const avgViews = posts.reduce((s, p) => s + (p.views || 0), 0) / posts.length;
 
-  return `متوسط ${avgLikes.toFixed(0)} لايك، ${avgComments.toFixed(0)} تعليق`;
+  const followers = data.followers || 0;
+  let engagementNote = "";
+
+  if (followers > 0) {
+    const rate = ((avgLikes + avgComments) / followers) * 100;
+    if (rate > 6) engagementNote = "🔥 تفاعل استثنائي";
+    else if (rate > 3) engagementNote = "✅ تفاعل فوق المتوسط";
+    else if (rate > 1) engagementNote = "🟡 تفاعل متوسط";
+    else engagementNote = "🔴 تفاعل ضعيف يحتاج تحسين";
+  }
+
+  const hasCTA = posts.some(p =>
+    p.caption && /رابط|link|click|اضغط|اطلب|احجز|visit|subscribe|تسجيل|اشترك|تواصل/i.test(p.caption)
+  );
+
+  const hasVideo = posts.some(p => p.mediaType === "video");
+
+  let result = `متوسط ${Math.round(avgLikes).toLocaleString()} لايك | ${Math.round(avgComments).toLocaleString()} تعليق`;
+  if (avgViews > 0) result += ` | ${Math.round(avgViews).toLocaleString()} مشاهدة`;
+  if (engagementNote) result += ` — ${engagementNote}`;
+  if (!hasCTA) result += " | ⚠️ غياب CTA";
+  if (!hasVideo) result += " | ⚠️ لا يوجد فيديو";
+
+  return result;
 }
 
-// ── Utility ──
-
+// ── Utilities ──
 function detectPlatform(url: string): string {
   const u = url.toLowerCase();
   if (u.includes("facebook.com") || u.includes("fb.com")) return "facebook";
   if (u.includes("instagram.com")) return "instagram";
   if (u.includes("tiktok.com")) return "tiktok";
   if (u.includes("twitter.com") || u.includes("x.com")) return "x";
-  return "facebook";
+  return "instagram";
 }
 
 function extractUsername(url: string): string {
@@ -567,7 +473,7 @@ function extractUsername(url: string): string {
     const fullUrl = url.startsWith("http") ? url : `https://${url}`;
     const u = new URL(fullUrl);
     const path = u.pathname.replace(/^\/+/, "");
-    return path.replace(/^@/, "").split("/")[0].split("?")[0];
+    return path.replace(/^@/, "").split("/")[0].split("?")[0] || url;
   } catch {
     return url.replace(/.*[/@]/, "").split("?")[0];
   }
