@@ -1,3 +1,4 @@
+export const maxDuration = 60;
 import { NextRequest, NextResponse } from "next/server";
 import { callGeminiWithFallback } from "@/lib/gemini-rotator";
 import { scrapeSocialProfile, SocialProfileData } from "@/services/lens/social-scraper";
